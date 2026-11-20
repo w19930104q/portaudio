@@ -66,7 +66,6 @@
 #include <memory.h>
 #include <string.h>
 #include <stdlib.h> /* needed for strtol() */
-#include <assert.h> /* needed by PA_VALIDATE_ENDIANNESS */
 
 #include "portaudio.h"
 #include "pa_util.h"
@@ -230,8 +229,24 @@ static PaError InitializeHostApis( void )
         if( hostApis_[hostApisCount_] )
         {
             PaUtilHostApiRepresentation* hostApi = hostApis_[hostApisCount_];
-            assert( hostApi->info.defaultInputDevice < hostApi->info.deviceCount );
-            assert( hostApi->info.defaultOutputDevice < hostApi->info.deviceCount );
+
+            /* Defensive: a host API reporting out-of-range default device indices
+               would previously trip an assertion and terminate the process.
+               Reset them to paNoDevice instead. */
+            if( hostApi->info.defaultInputDevice >= hostApi->info.deviceCount
+                    || hostApi->info.defaultInputDevice < paNoDevice )
+            {
+                PA_DEBUG(( "PortAudio: host API %d reported invalid defaultInputDevice %d, resetting to paNoDevice\n",
+                        hostApisCount_, hostApi->info.defaultInputDevice ));
+                hostApi->info.defaultInputDevice = paNoDevice;
+            }
+            if( hostApi->info.defaultOutputDevice >= hostApi->info.deviceCount
+                    || hostApi->info.defaultOutputDevice < paNoDevice )
+            {
+                PA_DEBUG(( "PortAudio: host API %d reported invalid defaultOutputDevice %d, resetting to paNoDevice\n",
+                        hostApisCount_, hostApi->info.defaultOutputDevice ));
+                hostApi->info.defaultOutputDevice = paNoDevice;
+            }
 
             /* the first successfully initialized host API with a default input *or*
                output device is used as the default host API.
@@ -377,7 +392,21 @@ PaError Pa_Initialize( void )
         initializing_ = 1;
 
         PA_VALIDATE_TYPE_SIZES;
-        PA_VALIDATE_ENDIANNESS;
+
+        /* Verify that compile-time and runtime endianness agree. Previously a
+           mismatch raised an assertion and terminated the process; now an
+           error is propagated to the caller instead. */
+        {
+            const long nativeOne = 1;
+            if( !PA_VALIDATE_ENDIANNESS( nativeOne ) )
+            {
+                PA_DEBUG(( "PortAudio: compile time and runtime endianness don't match\n" ));
+                initializing_ = 0;
+                result = paInternalError;
+                PA_LOGAPI_EXIT_PAERROR( "Pa_Initialize", result );
+                return result;
+            }
+        }
 
         PaUtil_InitializeClock();
         PaUtil_ResetTraceMessages();

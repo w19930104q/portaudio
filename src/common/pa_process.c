@@ -44,7 +44,6 @@
 */
 
 
-#include <assert.h>
 #include <string.h> /* memset() */
 
 #include "pa_process.h"
@@ -76,8 +75,10 @@ static unsigned long CalculateFrameShift( unsigned long M, unsigned long N )
     unsigned long i;
     unsigned long lcm;
 
-    assert( M > 0 );
-    assert( N > 0 );
+    /* Defensive: previously asserted M > 0 and N > 0. A zero would make the
+       LCM calculation divide by zero, so bail out instead of terminating. */
+    if( M == 0 || N == 0 )
+        return 0;
 
     lcm = LCM( M, N );
     for( i = M; i < lcm; i += M )
@@ -111,6 +112,16 @@ PaError PaUtil_InitializeBufferProcessor( PaUtilBufferProcessor* bp,
                 framesPerUserBuffer != paFramesPerBufferUnspecified )
             return paInvalidFlag;
     }
+
+    /* Defensive validation of invariants that were previously enforced with
+       process-terminating assertions (directly, or indirectly through
+       CalculateFrameShift() and the channel accessor functions). Invalid
+       values are now reported as an error instead of terminating the process. */
+    if( inputChannelCount < 0 || outputChannelCount < 0
+            || (inputChannelCount == 0 && outputChannelCount == 0)
+            || sampleRate <= 0.
+            || (hostBufferSizeMode == paUtilFixedHostBufferSize && framesPerHostBuffer == 0) )
+        return paInternalError;
 
     /* initialize buffer ptrs to zero so they can be freed if necessary in error */
     bp->tempInputBuffer = 0;
@@ -458,7 +469,9 @@ void PaUtil_SetInputFrameCount( PaUtilBufferProcessor* bp,
 
 void PaUtil_SetNoInput( PaUtilBufferProcessor* bp )
 {
-    assert( bp->inputChannelCount > 0 );
+    /* Defensive: previously asserted inputChannelCount > 0 */
+    if( bp->inputChannelCount == 0 || bp->hostInputChannels[0] == 0 )
+        return;
 
     bp->hostInputChannels[0][0].data = 0;
 }
@@ -467,7 +480,9 @@ void PaUtil_SetNoInput( PaUtilBufferProcessor* bp )
 void PaUtil_SetInputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data, unsigned int stride )
 {
-    assert( channel < bp->inputChannelCount );
+    /* Defensive: previously asserted channel < inputChannelCount */
+    if( channel >= bp->inputChannelCount || bp->hostInputChannels[0] == 0 )
+        return;
 
     bp->hostInputChannels[0][channel].data = data;
     bp->hostInputChannels[0][channel].stride = stride;
@@ -484,9 +499,11 @@ void PaUtil_SetInterleavedInputChannels( PaUtilBufferProcessor* bp,
     if( channelCount == 0 )
         channelCount = bp->inputChannelCount;
 
-    assert( firstChannel < bp->inputChannelCount );
-    assert( firstChannel + channelCount <= bp->inputChannelCount );
-    assert( bp->hostInputIsInterleaved );
+    /* Defensive: previously asserted valid channel range and interleaving */
+    if( !bp->hostInputIsInterleaved || bp->hostInputChannels[0] == 0
+            || firstChannel >= bp->inputChannelCount
+            || channelCount > bp->inputChannelCount - firstChannel )
+        return;
 
     for( i=0; i< channelCount; ++i )
     {
@@ -500,8 +517,10 @@ void PaUtil_SetInterleavedInputChannels( PaUtilBufferProcessor* bp,
 void PaUtil_SetNonInterleavedInputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data )
 {
-    assert( channel < bp->inputChannelCount );
-    assert( !bp->hostInputIsInterleaved );
+    /* Defensive: previously asserted valid channel and non-interleaving */
+    if( bp->hostInputIsInterleaved || bp->hostInputChannels[0] == 0
+            || channel >= bp->inputChannelCount )
+        return;
 
     bp->hostInputChannels[0][channel].data = data;
     bp->hostInputChannels[0][channel].stride = 1;
@@ -518,7 +537,9 @@ void PaUtil_Set2ndInputFrameCount( PaUtilBufferProcessor* bp,
 void PaUtil_Set2ndInputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data, unsigned int stride )
 {
-    assert( channel < bp->inputChannelCount );
+    /* Defensive: previously asserted channel < inputChannelCount */
+    if( channel >= bp->inputChannelCount || bp->hostInputChannels[1] == 0 )
+        return;
 
     bp->hostInputChannels[1][channel].data = data;
     bp->hostInputChannels[1][channel].stride = stride;
@@ -535,9 +556,11 @@ void PaUtil_Set2ndInterleavedInputChannels( PaUtilBufferProcessor* bp,
     if( channelCount == 0 )
         channelCount = bp->inputChannelCount;
 
-    assert( firstChannel < bp->inputChannelCount );
-    assert( firstChannel + channelCount <= bp->inputChannelCount );
-    assert( bp->hostInputIsInterleaved );
+    /* Defensive: previously asserted valid channel range and interleaving */
+    if( !bp->hostInputIsInterleaved || bp->hostInputChannels[1] == 0
+            || firstChannel >= bp->inputChannelCount
+            || channelCount > bp->inputChannelCount - firstChannel )
+        return;
 
     for( i=0; i< channelCount; ++i )
     {
@@ -551,8 +574,10 @@ void PaUtil_Set2ndInterleavedInputChannels( PaUtilBufferProcessor* bp,
 void PaUtil_Set2ndNonInterleavedInputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data )
 {
-    assert( channel < bp->inputChannelCount );
-    assert( !bp->hostInputIsInterleaved );
+    /* Defensive: previously asserted valid channel and non-interleaving */
+    if( bp->hostInputIsInterleaved || bp->hostInputChannels[1] == 0
+            || channel >= bp->inputChannelCount )
+        return;
 
     bp->hostInputChannels[1][channel].data = data;
     bp->hostInputChannels[1][channel].stride = 1;
@@ -571,7 +596,9 @@ void PaUtil_SetOutputFrameCount( PaUtilBufferProcessor* bp,
 
 void PaUtil_SetNoOutput( PaUtilBufferProcessor* bp )
 {
-    assert( bp->outputChannelCount > 0 );
+    /* Defensive: previously asserted outputChannelCount > 0 */
+    if( bp->outputChannelCount == 0 || bp->hostOutputChannels[0] == 0 )
+        return;
 
     bp->hostOutputChannels[0][0].data = 0;
 
@@ -582,8 +609,10 @@ void PaUtil_SetNoOutput( PaUtilBufferProcessor* bp )
 void PaUtil_SetOutputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data, unsigned int stride )
 {
-    assert( channel < bp->outputChannelCount );
-    assert( data != NULL );
+    /* Defensive: previously asserted valid channel and non-NULL data */
+    if( channel >= bp->outputChannelCount || data == NULL
+            || bp->hostOutputChannels[0] == 0 )
+        return;
 
     bp->hostOutputChannels[0][channel].data = data;
     bp->hostOutputChannels[0][channel].stride = stride;
@@ -600,9 +629,11 @@ void PaUtil_SetInterleavedOutputChannels( PaUtilBufferProcessor* bp,
     if( channelCount == 0 )
         channelCount = bp->outputChannelCount;
 
-    assert( firstChannel < bp->outputChannelCount );
-    assert( firstChannel + channelCount <= bp->outputChannelCount );
-    assert( bp->hostOutputIsInterleaved );
+    /* Defensive: previously asserted valid channel range and interleaving */
+    if( !bp->hostOutputIsInterleaved || bp->hostOutputChannels[0] == 0
+            || firstChannel >= bp->outputChannelCount
+            || channelCount > bp->outputChannelCount - firstChannel )
+        return;
 
     for( i=0; i< channelCount; ++i )
     {
@@ -615,8 +646,10 @@ void PaUtil_SetInterleavedOutputChannels( PaUtilBufferProcessor* bp,
 void PaUtil_SetNonInterleavedOutputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data )
 {
-    assert( channel < bp->outputChannelCount );
-    assert( !bp->hostOutputIsInterleaved );
+    /* Defensive: previously asserted valid channel and non-interleaving */
+    if( bp->hostOutputIsInterleaved || bp->hostOutputChannels[0] == 0
+            || channel >= bp->outputChannelCount )
+        return;
 
     PaUtil_SetOutputChannel( bp, channel, data, 1 );
 }
@@ -632,8 +665,10 @@ void PaUtil_Set2ndOutputFrameCount( PaUtilBufferProcessor* bp,
 void PaUtil_Set2ndOutputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data, unsigned int stride )
 {
-    assert( channel < bp->outputChannelCount );
-    assert( data != NULL );
+    /* Defensive: previously asserted valid channel and non-NULL data */
+    if( channel >= bp->outputChannelCount || data == NULL
+            || bp->hostOutputChannels[1] == 0 )
+        return;
 
     bp->hostOutputChannels[1][channel].data = data;
     bp->hostOutputChannels[1][channel].stride = stride;
@@ -650,9 +685,11 @@ void PaUtil_Set2ndInterleavedOutputChannels( PaUtilBufferProcessor* bp,
     if( channelCount == 0 )
         channelCount = bp->outputChannelCount;
 
-    assert( firstChannel < bp->outputChannelCount );
-    assert( firstChannel + channelCount <= bp->outputChannelCount );
-    assert( bp->hostOutputIsInterleaved );
+    /* Defensive: previously asserted valid channel range and interleaving */
+    if( !bp->hostOutputIsInterleaved || bp->hostOutputChannels[1] == 0
+            || firstChannel >= bp->outputChannelCount
+            || channelCount > bp->outputChannelCount - firstChannel )
+        return;
 
     for( i=0; i< channelCount; ++i )
     {
@@ -665,8 +702,10 @@ void PaUtil_Set2ndInterleavedOutputChannels( PaUtilBufferProcessor* bp,
 void PaUtil_Set2ndNonInterleavedOutputChannel( PaUtilBufferProcessor* bp,
         unsigned int channel, void *data )
 {
-    assert( channel < bp->outputChannelCount );
-    assert( !bp->hostOutputIsInterleaved );
+    /* Defensive: previously asserted valid channel and non-interleaving */
+    if( bp->hostOutputIsInterleaved || bp->hostOutputChannels[1] == 0
+            || channel >= bp->outputChannelCount )
+        return;
 
     PaUtil_Set2ndOutputChannel( bp, channel, data, 1 );
 }
@@ -1260,17 +1299,21 @@ static void CopyTempOutputBuffersToHostOutputBuffers( PaUtilBufferProcessor *bp)
 
         for( i=0; i<bp->outputChannelCount; ++i )
         {
-            assert( hostOutputChannels[i].data != NULL );
-            bp->outputConverter(    hostOutputChannels[i].data,
-                                    hostOutputChannels[i].stride,
-                                    srcBytePtr, srcSampleStrideSamples,
-                                    frameCount, &bp->ditherGenerator );
+            /* Defensive: previously asserted hostOutputChannels[i].data != NULL.
+               Skip channels with no host buffer instead of terminating. */
+            if( hostOutputChannels[i].data != NULL )
+            {
+                bp->outputConverter(    hostOutputChannels[i].data,
+                                        hostOutputChannels[i].stride,
+                                        srcBytePtr, srcSampleStrideSamples,
+                                        frameCount, &bp->ditherGenerator );
+
+                /* advance dest ptr for next iteration */
+                hostOutputChannels[i].data = ((unsigned char*)hostOutputChannels[i].data) +
+                        frameCount * hostOutputChannels[i].stride * bp->bytesPerHostOutputSample;
+            }
 
             srcBytePtr += srcChannelStrideBytes;  /* skip to next source channel */
-
-            /* advance dest ptr for next iteration */
-            hostOutputChannels[i].data = ((unsigned char*)hostOutputChannels[i].data) +
-                    frameCount * hostOutputChannels[i].stride * bp->bytesPerHostOutputSample;
         }
 
         if( bp->hostOutputFrameCount[0] > 0 )
@@ -1492,17 +1535,13 @@ unsigned long PaUtil_EndBufferProcessing( PaUtilBufferProcessor* bp, int *stream
     unsigned long framesToProcess, framesToGo;
     unsigned long framesProcessed = 0;
 
-    if( bp->inputChannelCount != 0 && bp->outputChannelCount != 0
-            && bp->hostInputChannels[0][0].data /* input was supplied (see PaUtil_SetNoInput) */
-            && bp->hostOutputChannels[0][0].data /* output was supplied (see PaUtil_SetNoOutput) */ )
-    {
-        assert( (bp->hostInputFrameCount[0] + bp->hostInputFrameCount[1]) ==
-                (bp->hostOutputFrameCount[0] + bp->hostOutputFrameCount[1]) );
-    }
-
-    assert( *streamCallbackResult == paContinue
-            || *streamCallbackResult == paComplete
-            || *streamCallbackResult == paAbort ); /* don't forget to pass in a valid callback result value */
+    /* Defensive: an invalid callback result value would previously trip an
+       assertion ("don't forget to pass in a valid callback result value").
+       Treat it as paAbort so that no further callbacks are invoked. */
+    if( *streamCallbackResult != paContinue
+            && *streamCallbackResult != paComplete
+            && *streamCallbackResult != paAbort )
+        *streamCallbackResult = paAbort;
 
     if( bp->useNonAdaptingProcess )
     {
@@ -1511,7 +1550,17 @@ unsigned long PaUtil_EndBufferProcessing( PaUtilBufferProcessor* bp, int *stream
             /* full duplex non-adapting process, splice buffers if they are
                 different lengths */
 
-            framesToGo = bp->hostOutputFrameCount[0] + bp->hostOutputFrameCount[1]; /* relies on assert above for input/output equivalence */
+            framesToGo = bp->hostOutputFrameCount[0] + bp->hostOutputFrameCount[1];
+
+            /* Defensive: when both input and output were supplied, their frame
+               counts were previously asserted to be equal. If they disagree,
+               process only as many frames as both directions can sustain. */
+            if( bp->hostInputChannels[0][0].data ) /* input was supplied (see PaUtil_SetNoInput) */
+            {
+                unsigned long inputFramesToGo = bp->hostInputFrameCount[0] + bp->hostInputFrameCount[1];
+                if( inputFramesToGo < framesToGo )
+                    framesToGo = inputFramesToGo;
+            }
 
             do{
                 unsigned long noInputInputFrameCount;
@@ -1565,7 +1614,10 @@ unsigned long PaUtil_EndBufferProcessing( PaUtilBufferProcessor* bp, int *stream
                 framesToProcess = PA_MIN_( *hostInputFrameCount,
                                        *hostOutputFrameCount );
 
-                assert( framesToProcess != 0 );
+                /* Defensive: previously asserted framesToProcess != 0. A zero
+                   here would loop forever, so bail out instead. */
+                if( framesToProcess == 0 )
+                    break;
 
                 framesProcessedThisIteration = NonAdaptingProcess( bp, streamCallbackResult,
                         hostInputChannels, hostOutputChannels,

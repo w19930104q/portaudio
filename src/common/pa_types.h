@@ -49,8 +49,8 @@
  platform doesn't use configure, and doesn't use the default values below
  you will need to explicitly define these symbols in your make file.
 
- A PA_VALIDATE_SIZES macro is provided to assert that the values set in this
- file are correct.
+ A PA_VALIDATE_TYPE_SIZES macro is provided to verify at compile time that
+ the values set in this file are correct.
 */
 
 #ifndef SIZEOF_SHORT
@@ -90,18 +90,21 @@ typedef unsigned long PaUint32;
 #endif
 
 
-/* PA_VALIDATE_TYPE_SIZES compares the size of the integer types at runtime to
- ensure that PortAudio was configured correctly, and raises an assertion if
- they don't match the expected values. <assert.h> must be included in the
- context in which this macro is used.
+/* PA_VALIDATE_TYPE_SIZES verifies at compile time that the size of the integer
+ types matches the expected values, ensuring that PortAudio was configured
+ correctly. A mismatch causes a compile error (a typedef with negative array
+ size) rather than a runtime assertion that would terminate the process.
+ The trailing enum references the typedef via sizeof so that compilers don't
+ warn about it being unused.
 */
+#define PA_VALIDATE_TYPE_SIZES_CONCAT_INNER_( a, b ) a ## b
+#define PA_VALIDATE_TYPE_SIZES_CONCAT_( a, b ) PA_VALIDATE_TYPE_SIZES_CONCAT_INNER_( a, b )
 #define PA_VALIDATE_TYPE_SIZES \
-    { \
-        assert( "PortAudio: type sizes are not correct in pa_types.h" && sizeof( PaUint16 ) == 2 ); \
-        assert( "PortAudio: type sizes are not correct in pa_types.h" && sizeof( PaInt16 ) == 2 ); \
-        assert( "PortAudio: type sizes are not correct in pa_types.h" && sizeof( PaUint32 ) == 4 ); \
-        assert( "PortAudio: type sizes are not correct in pa_types.h" && sizeof( PaInt32 ) == 4 ); \
-    }
+    typedef char PA_VALIDATE_TYPE_SIZES_CONCAT_( pa_type_sizes_are_invalid_, __LINE__ ) \
+        [ ( sizeof( PaUint16 ) == 2 && sizeof( PaInt16 ) == 2 && \
+            sizeof( PaUint32 ) == 4 && sizeof( PaInt32 ) == 4 ) ? 1 : -1 ]; \
+    enum { PA_VALIDATE_TYPE_SIZES_CONCAT_( pa_type_sizes_check_, __LINE__ ) = \
+        (int)sizeof( PA_VALIDATE_TYPE_SIZES_CONCAT_( pa_type_sizes_are_invalid_, __LINE__ ) ) }
 
 
 #endif /* PA_TYPES_H */

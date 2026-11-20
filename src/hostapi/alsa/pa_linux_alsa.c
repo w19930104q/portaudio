@@ -706,13 +706,6 @@ static void PaAlsa_CloseLibrary()
 /* Print warning but do not goto error. */
 #define ENSURE_NO_GOTO_(expr, code) ENSURE_ON_ERROR_(expr, code, (void)0)
 
-#define ASSERT_CALL_(expr, success) \
-    do {\
-        int __pa_assert_error_id;\
-        __pa_assert_error_id = (expr);\
-        assert( success == __pa_assert_error_id );\
-    } while (0)
-
 static int numPeriods_ = 4;
 static int busyRetries_ = 100;
 
@@ -926,7 +919,9 @@ static void Terminate( struct PaUtilHostApiRepresentation *hostApi )
 {
     PaAlsaHostApiRepresentation *alsaHostApi = (PaAlsaHostApiRepresentation*)hostApi;
 
-    assert( hostApi );
+    /* Defensive: previously asserted hostApi != NULL */
+    if( !hostApi )
+        return;
 
     PaAlsa_UninstallSilentLogHandler();
 
@@ -962,7 +957,8 @@ static PaError GropeDevice( snd_pcm_t* pcm, int isPlug, StreamDirection mode, in
     double defaultSr = devInfo->baseDeviceInfo.defaultSampleRate;
     unsigned int approximateSampleRate = 0;
 
-    assert( pcm );
+    /* Defensive: previously asserted pcm != NULL */
+    PA_UNLESS( pcm, paUnanticipatedHostError );
 
     PA_DEBUG(( "%s: collecting info ..\n", __FUNCTION__ ));
 
@@ -1503,7 +1499,8 @@ static PaError BuildDeviceList( PaAlsaHostApiRepresentation *alsaApi )
         ENSURE_( alsa_snd_config_update(), paUnanticipatedHostError );
         PA_DEBUG(( "Updating snd_config\n" ));
     }
-    assert( *alsa_snd_config );
+    /* Defensive: previously asserted *alsa_snd_config != NULL */
+    PA_UNLESS( *alsa_snd_config, paUnanticipatedHostError );
     if( ( res = alsa_snd_config_search( *alsa_snd_config, "pcm", &topNode ) ) >= 0 )
     {
         snd_config_iterator_t i, next;
@@ -1601,7 +1598,12 @@ static PaError BuildDeviceList( PaAlsaHostApiRepresentation *alsaApi )
 
         PA_ENSURE( FillInDevInfo( alsaApi, hwInfo, blocking, devInfo, &devIdx ) );
     }
-    assert( devIdx <= numDeviceNames );
+    /* Defensive: previously asserted devIdx <= numDeviceNames */
+    if( devIdx > numDeviceNames )
+    {
+        PA_DEBUG(( "%s: More devices (%d) filled in than expected (%d), clamping\n", __FUNCTION__, devIdx, (int)numDeviceNames ));
+        devIdx = numDeviceNames;
+    }
     /* Now inspect 'dmix' and 'default' plugins */
     for( size_t i = 0; i < numDeviceNames; ++i )
     {
@@ -1636,11 +1638,13 @@ static PaError ValidateParameters( const PaStreamParameters *parameters, PaUtilH
     PaError result = paNoError;
     int maxChans;
     const PaAlsaDeviceInfo *deviceInfo = NULL;
-    assert( parameters );
+    /* Defensive: previously asserted parameters != NULL */
+    PA_UNLESS( parameters, paInternalError );
 
     if( parameters->device != paUseHostApiSpecificDeviceSpecification )
     {
-        assert( parameters->device < hostApi->info.deviceCount );
+        /* Propagate an error instead of asserting on an out-of-range device */
+        PA_UNLESS( parameters->device >= 0 && parameters->device < hostApi->info.deviceCount, paInvalidDevice );
         PA_UNLESS( parameters->hostApiSpecificStreamInfo == NULL, paBadIODeviceCombination );
         deviceInfo = GetDeviceInfo( hostApi, parameters->device );
     }
@@ -1657,8 +1661,10 @@ static PaError ValidateParameters( const PaStreamParameters *parameters, PaUtilH
         return paNoError;
     }
 
-    assert( deviceInfo );
-    assert( parameters->hostApiSpecificStreamInfo == NULL );
+    /* Defensive: previously asserted deviceInfo != NULL and
+       parameters->hostApiSpecificStreamInfo == NULL (the latter is checked
+       above and propagates paBadIODeviceCombination). */
+    PA_UNLESS( deviceInfo, paInternalError );
     maxChans = ( StreamDirection_In == mode ? deviceInfo->baseDeviceInfo.maxInputChannels :
         deviceInfo->baseDeviceInfo.maxOutputChannels );
     PA_UNLESS( parameters->channelCount <= maxChans, paInvalidChannelCount );
@@ -2039,7 +2045,8 @@ static PaError PaAlsaStreamComponent_Initialize( PaAlsaStreamComponent *self, Pa
 {
     PaError result = paNoError;
     PaSampleFormat userSampleFormat = params->sampleFormat, hostSampleFormat = paNoError;
-    assert( params->channelCount > 0 );
+    /* Defensive: previously asserted params->channelCount > 0 */
+    PA_UNLESS( params->channelCount > 0, paInvalidChannelCount );
 
     /* Make sure things have an initial value */
     memset( self, 0, sizeof (PaAlsaStreamComponent) );
@@ -2298,7 +2305,8 @@ static PaError PaAlsaStream_Initialize( PaAlsaStream *self, PaAlsaHostApiReprese
         PaStreamFlags streamFlags, void *userData )
 {
     PaError result = paNoError;
-    assert( self );
+    /* Defensive: previously asserted self != NULL */
+    PA_UNLESS( self, paInternalError );
 
     memset( self, 0, sizeof( PaAlsaStream ) );
 
@@ -2334,13 +2342,14 @@ static PaError PaAlsaStream_Initialize( PaAlsaStream *self, PaAlsaHostApiReprese
         PA_ENSURE( PaAlsaStreamComponent_Initialize( &self->playback, alsaApi, outParams, StreamDirection_Out, NULL != callback ) );
     }
 
-    assert( self->capture.nfds || self->playback.nfds );
+    /* Defensive: previously asserted that at least one direction has poll fds */
+    PA_UNLESS( self->capture.nfds || self->playback.nfds, paInternalError );
 
     PA_UNLESS( self->pfds = (struct pollfd*)PaUtil_AllocateZeroInitializedMemory( ( self->capture.nfds +
                     self->playback.nfds ) * sizeof( struct pollfd ) ), paInsufficientMemory );
 
     PaUtil_InitializeCpuLoadMeasurer( &self->cpuLoadMeasurer, sampleRate );
-    ASSERT_CALL_( PaUnixMutex_Initialize( &self->stateMtx ), paNoError );
+    PA_ENSURE( PaUnixMutex_Initialize( &self->stateMtx ) );
 
 error:
     return result;
@@ -2352,7 +2361,9 @@ error:
  */
 static void PaAlsaStream_Terminate( PaAlsaStream *self )
 {
-    assert( self );
+    /* Defensive: previously asserted self != NULL */
+    if( !self )
+        return;
 
     if( self->capture.pcm )
     {
@@ -2364,7 +2375,11 @@ static void PaAlsaStream_Terminate( PaAlsaStream *self )
     }
 
     PaUtil_FreeMemory( self->pfds );
-    ASSERT_CALL_( PaUnixMutex_Terminate( &self->stateMtx ), paNoError );
+    if( PaUnixMutex_Terminate( &self->stateMtx ) != paNoError )
+    {
+        /* Defensive: previously an assertion failed here. */
+        PA_DEBUG(( "%s: Failed to terminate mutex\n", __FUNCTION__ ));
+    }
 
     PaUtil_FreeMemory( self );
 }
@@ -2376,7 +2391,10 @@ static void PaAlsaStream_Terminate( PaAlsaStream *self )
  */
 static int CalculatePollTimeout( const PaAlsaStream *stream, unsigned long frames )
 {
-    assert( stream->streamRepresentation.streamInfo.sampleRate > 0.0 );
+    /* Defensive: previously asserted sampleRate > 0.0. A non-positive sample
+       rate would cause a division by zero; return a minimal timeout instead. */
+    if( stream->streamRepresentation.streamInfo.sampleRate <= 0.0 )
+        return 1;
     /* Period in msecs, rounded up */
     return (int)ceil( 1000 * frames / stream->streamRepresentation.streamInfo.sampleRate );
 }
@@ -2452,7 +2470,10 @@ static PaError PaAlsaStreamComponent_DetermineFramesPerBuffer( PaAlsaStreamCompo
             else
                 bufferSize -= remainder;
 
-            assert( bufferSize % framesPerUserBuffer == 0 );
+            /* Defensive: previously asserted bufferSize % framesPerUserBuffer == 0 */
+            if( bufferSize % framesPerUserBuffer != 0 )
+                PA_DEBUG(( "%s: bufferSize %lu is not a multiple of framesPerUserBuffer %lu\n",
+                        __FUNCTION__, bufferSize, framesPerUserBuffer ));
         }
         else if( framesPerUserBuffer % bufferSize != 0 )
         {
@@ -2476,7 +2497,10 @@ static PaError PaAlsaStreamComponent_DetermineFramesPerBuffer( PaAlsaStreamCompo
                 bufferSize = newSz;
             }
 
-            assert( framesPerUserBuffer % bufferSize == 0 );
+            /* Defensive: previously asserted framesPerUserBuffer % bufferSize == 0 */
+            if( framesPerUserBuffer % bufferSize != 0 )
+                PA_DEBUG(( "%s: framesPerUserBuffer %lu is not a multiple of bufferSize %lu\n",
+                        __FUNCTION__, framesPerUserBuffer, bufferSize ));
         }
     }
 
@@ -2490,7 +2514,8 @@ static PaError PaAlsaStreamComponent_DetermineFramesPerBuffer( PaAlsaStreamCompo
         ENSURE_( alsa_snd_pcm_hw_params_get_periods_min( hwParams, &minPeriods, &dir ), paUnanticipatedHostError );
         dir = 0;
         ENSURE_( alsa_snd_pcm_hw_params_get_periods_max( hwParams, &maxPeriods, &dir ), paUnanticipatedHostError );
-        assert( maxPeriods > 1 );
+        /* Defensive: previously asserted maxPeriods > 1 */
+        PA_UNLESS( maxPeriods > 1, paUnanticipatedHostError );
 
         /* Clamp to min/max */
         numPeriods = PA_MIN(maxPeriods, PA_MAX(minPeriods, numPeriods));
@@ -2511,7 +2536,13 @@ static PaError PaAlsaStreamComponent_DetermineFramesPerBuffer( PaAlsaStreamCompo
             /* Test (borrowed from older implementation) */
             if( framesPerHostBuffer < framesPerUserBuffer )
             {
-                assert( framesPerUserBuffer % framesPerHostBuffer == 0 );
+                /* Defensive: previously asserted framesPerUserBuffer % framesPerHostBuffer == 0
+                   (which would itself divide by zero if framesPerHostBuffer were 0) */
+                if( framesPerHostBuffer == 0 )
+                    framesPerHostBuffer = 1;
+                else if( framesPerUserBuffer % framesPerHostBuffer != 0 )
+                    PA_DEBUG(( "%s: framesPerUserBuffer %lu is not a multiple of framesPerHostBuffer %lu\n",
+                            __FUNCTION__, framesPerUserBuffer, framesPerHostBuffer ));
                 if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer, 0 ) < 0 )
                 {
                     if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer * 2, 0 ) == 0 )
@@ -2522,7 +2553,10 @@ static PaError PaAlsaStreamComponent_DetermineFramesPerBuffer( PaAlsaStreamCompo
             }
             else
             {
-                assert( framesPerHostBuffer % framesPerUserBuffer == 0 );
+                /* Defensive: previously asserted framesPerHostBuffer % framesPerUserBuffer == 0 */
+                if( framesPerHostBuffer % framesPerUserBuffer != 0 )
+                    PA_DEBUG(( "%s: framesPerHostBuffer %lu is not a multiple of framesPerUserBuffer %lu\n",
+                            __FUNCTION__, framesPerHostBuffer, framesPerUserBuffer ));
                 if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer, 0 ) < 0 )
                 {
                     if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer + framesPerUserBuffer, 0 ) == 0 )
@@ -2567,7 +2601,13 @@ static PaError PaAlsaStreamComponent_DetermineFramesPerBuffer( PaAlsaStreamCompo
 
             if( framesPerHostBuffer < framesPerUserBuffer )
             {
-                assert( framesPerUserBuffer % framesPerHostBuffer == 0 );
+                /* Defensive: previously asserted framesPerUserBuffer % framesPerHostBuffer == 0
+                   (which would itself divide by zero if framesPerHostBuffer were 0) */
+                if( framesPerHostBuffer == 0 )
+                    framesPerHostBuffer = 1;
+                else if( framesPerUserBuffer % framesPerHostBuffer != 0 )
+                    PA_DEBUG(( "%s: framesPerUserBuffer %lu is not a multiple of framesPerHostBuffer %lu\n",
+                            __FUNCTION__, framesPerUserBuffer, framesPerHostBuffer ));
                 if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer, 0 ) < 0 )
                 {
                     if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer * 2, 0 ) == 0 )
@@ -2578,7 +2618,10 @@ static PaError PaAlsaStreamComponent_DetermineFramesPerBuffer( PaAlsaStreamCompo
             }
             else
             {
-                assert( framesPerHostBuffer % framesPerUserBuffer == 0 );
+                /* Defensive: previously asserted framesPerHostBuffer % framesPerUserBuffer == 0 */
+                if( framesPerHostBuffer % framesPerUserBuffer != 0 )
+                    PA_DEBUG(( "%s: framesPerHostBuffer %lu is not a multiple of framesPerUserBuffer %lu\n",
+                            __FUNCTION__, framesPerHostBuffer, framesPerUserBuffer ));
                 if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer, 0 ) < 0 )
                 {
                     if( alsa_snd_pcm_hw_params_test_period_size( self->pcm, hwParams, framesPerHostBuffer + framesPerUserBuffer, 0 ) == 0 )
@@ -2837,7 +2880,8 @@ static PaError PaAlsaStream_DetermineFramesPerBuffer( PaAlsaStream* self, double
         }
         else
         {
-            assert( self->playback.pcm );
+            /* Defensive: previously asserted self->playback.pcm != NULL */
+            PA_UNLESS( self->playback.pcm, paInternalError );
             PA_ENSURE( PaAlsaStreamComponent_DetermineFramesPerBuffer( &self->playback, outputParameters, framesPerUserBuffer,
                         sampleRate, hwParamsPlayback, &accurate ) );
             framesPerHostBuffer = self->playback.framesPerPeriod;
@@ -2889,7 +2933,8 @@ static PaError PaAlsaStream_Configure( PaAlsaStream *self, const PaStreamParamet
 
     if( self->capture.pcm )
     {
-        assert( self->capture.framesPerPeriod != 0 );
+        /* Defensive: previously asserted self->capture.framesPerPeriod != 0 */
+        PA_UNLESS( self->capture.framesPerPeriod != 0, paInternalError );
         PA_ENSURE( PaAlsaStreamComponent_FinishConfigure( &self->capture, hwParamsCapture, inParams, self->primeBuffers, approximateSampleRate,
                     inputLatency ) );
         /* Now that we have finalized the hwParams, we can get a more accurate sample rate. */
@@ -2899,7 +2944,8 @@ static PaError PaAlsaStream_Configure( PaAlsaStream *self, const PaStreamParamet
     }
     if( self->playback.pcm )
     {
-        assert( self->playback.framesPerPeriod != 0 );
+        /* Defensive: previously asserted self->playback.framesPerPeriod != 0 */
+        PA_UNLESS( self->playback.framesPerPeriod != 0, paInternalError );
         PA_ENSURE( PaAlsaStreamComponent_FinishConfigure( &self->playback, hwParamsPlayback, outParams, self->primeBuffers, approximateSampleRate,
                     outputLatency ) );
         /* Now that we have finalized the hwParams, we can get a more accurate sample rate. */
@@ -3152,7 +3198,11 @@ static int IsRunning( PaAlsaStream *stream )
     }
 
 end:
-    ASSERT_CALL_( PaUnixMutex_Unlock( &stream->stateMtx ), paNoError );
+    if( PaUnixMutex_Unlock( &stream->stateMtx ) != paNoError )
+    {
+        /* Defensive: previously an assertion failed here. */
+        PA_DEBUG(( "%s: Failed to unlock mutex\n", __FUNCTION__ ));
+    }
     return result;
 error:
     goto error;
@@ -3398,7 +3448,10 @@ static int SetApproximateSampleRate(
     unsigned int setRate = *sampleRatePtr;
     unsigned int deviation;
 
-    assert( pcm && hwParams );
+    /* Defensive: previously asserted pcm && hwParams. Return an error directly
+       since the error logging path below dereferences hwParams. */
+    if( !pcm || !hwParams )
+        return paInternalError;
 
     /* The Alsa sample rate is set by integer value; also the actual rate may differ */
     ENSURE_( alsa_snd_pcm_hw_params_set_rate_near( pcm, hwParams, &setRate, NULL ), paUnanticipatedHostError );
@@ -3432,7 +3485,10 @@ static int GetExactSampleRate( snd_pcm_hw_params_t *hwParams, double *sampleRate
     unsigned int num, den = 1;
     int err;
 
-    assert( hwParams );
+    /* Defensive: previously asserted hwParams != NULL. Return a negative
+       (ALSA-style) error so callers propagate it. */
+    if( !hwParams || !sampleRate )
+        return -1;
 
     err = alsa_snd_pcm_hw_params_get_rate_numden( hwParams, &num, &den );
     *sampleRate = (double) num / den;
@@ -3589,7 +3645,9 @@ static void OnExit( void *data )
 {
     PaAlsaStream *stream = (PaAlsaStream *) data;
 
-    assert( data );
+    /* Defensive: previously asserted data != NULL */
+    if( !data )
+        return;
 
     PaUtil_ResetCpuLoadMeasurer( &stream->cpuLoadMeasurer );
 
@@ -3729,7 +3787,8 @@ static PaError PaAlsaStreamComponent_DoChannelAdaption( PaAlsaStreamComponent *s
     unsigned char *src, *dst;
     int convertMono = ( self->numHostChannels % 2 ) == 0 && ( self->numUserChannels % 2 ) != 0;
 
-    assert( StreamDirection_Out == self->streamDir );
+    /* Defensive: previously asserted StreamDirection_Out == self->streamDir */
+    PA_UNLESS( StreamDirection_Out == self->streamDir, paInternalError );
 
     if( self->hostInterleaved )
     {
@@ -3908,11 +3967,13 @@ static PaError PaAlsaStream_GetAvailableFrames( PaAlsaStream *self, int queryCap
     unsigned long captureFrames, playbackFrames;
     *xrunOccurred = 0;
 
-    assert( queryCapture || queryPlayback );
+    /* Defensive: previously asserted queryCapture || queryPlayback */
+    PA_UNLESS( queryCapture || queryPlayback, paInternalError );
 
     if( queryCapture )
     {
-        assert( self->capture.pcm );
+        /* Defensive: previously asserted self->capture.pcm != NULL */
+        PA_UNLESS( self->capture.pcm, paInternalError );
         PA_ENSURE( PaAlsaStreamComponent_GetAvailableFrames( &self->capture, &captureFrames, xrunOccurred ) );
         if( *xrunOccurred )
         {
@@ -3921,7 +3982,8 @@ static PaError PaAlsaStream_GetAvailableFrames( PaAlsaStream *self, int queryCap
     }
     if( queryPlayback )
     {
-        assert( self->playback.pcm );
+        /* Defensive: previously asserted self->playback.pcm != NULL */
+        PA_UNLESS( self->playback.pcm, paInternalError );
         PA_ENSURE( PaAlsaStreamComponent_GetAvailableFrames( &self->playback, &playbackFrames, xrunOccurred ) );
         if( *xrunOccurred )
         {
@@ -3966,8 +4028,8 @@ static PaError PaAlsaStream_WaitForFrames( PaAlsaStream *self, unsigned long *fr
     int xrun = 0, timeouts = 0;
     int pollResults;
 
-    assert( self );
-    assert( framesAvail );
+    /* Defensive: previously asserted self != NULL and framesAvail != NULL */
+    PA_UNLESS( self && framesAvail, paInternalError );
 
     if( !self->callbackMode )
     {
@@ -4130,18 +4192,29 @@ static PaError PaAlsaStream_WaitForFrames( PaAlsaStream *self, unsigned long *fr
         {
             if( !self->playback.ready && !self->neverDropInput )
             {
-                /* Drop input, a period's worth */
-                assert( self->capture.ready );
-                PaAlsaStreamComponent_EndProcessing( &self->capture, PA_MIN( self->capture.framesPerPeriod,
-                            *framesAvail ), &xrun );
-                *framesAvail = 0;
-                self->capture.ready = 0;
+                /* Drop input, a period's worth. Defensive: previously asserted
+                   self->capture.ready; only drop if capture is actually ready. */
+                if( self->capture.ready )
+                {
+                    PaAlsaStreamComponent_EndProcessing( &self->capture, PA_MIN( self->capture.framesPerPeriod,
+                                *framesAvail ), &xrun );
+                    *framesAvail = 0;
+                    self->capture.ready = 0;
+                }
             }
         }
         else if( self->capture.pcm )
-            assert( self->capture.ready );
+        {
+            /* Defensive: previously asserted self->capture.ready */
+            if( !self->capture.ready )
+                PA_DEBUG(( "%s: capture pcm not marked ready\n", __FUNCTION__ ));
+        }
         else
-            assert( self->playback.ready );
+        {
+            /* Defensive: previously asserted self->playback.ready */
+            if( !self->playback.ready )
+                PA_DEBUG(( "%s: playback pcm not marked ready\n", __FUNCTION__ ));
+        }
     }
 
 end:
@@ -4325,8 +4398,7 @@ static PaError PaAlsaStream_SetUpBuffers( PaAlsaStream* self, unsigned long* num
     }
     if( xrun )
     {
-        /* Nothing more to do */
-        assert( 0 == commonFrames );
+        /* Nothing more to do (commonFrames is still 0 here) */
         goto end;
     }
 
@@ -4375,9 +4447,10 @@ static PaError PaAlsaStream_SetUpBuffers( PaAlsaStream* self, unsigned long* num
         }
         else
         {
-            /* We have output underflow, but keeping input data (paNeverDropInput) */
-            assert( self->neverDropInput );
-            assert( self->capture.pcm != NULL );
+            /* We have output underflow, but keeping input data (paNeverDropInput).
+               Defensive: previously asserted self->neverDropInput and
+               self->capture.pcm != NULL. */
+            PA_UNLESS( self->neverDropInput && self->capture.pcm != NULL, paInternalError );
             PA_DEBUG(( "%s: Setting output buffers to NULL\n", __FUNCTION__ ));
             PaUtil_SetNoOutput( &self->bufferProcessor );
         }
@@ -4414,9 +4487,18 @@ static void *CallbackThreadFunc( void *userData )
     PaStreamCallbackFlags cbFlags = 0;  /* We might want to keep state across iterations */
     int streamStarted = 0;
 
-    assert( stream );
-    /* Not implemented */
-    assert( !stream->primeBuffers );
+    /* Defensive: previously asserted stream != NULL */
+    if( !stream )
+        return NULL;
+
+    /* Buffer priming is not implemented (can never be requested through the
+       public API). Previously an assertion failed here; fall back to the
+       regular unprimed start path instead of terminating the process. */
+    if( stream->primeBuffers )
+    {
+        PA_DEBUG(( "%s: Buffer priming is not supported, starting unprimed\n", __FUNCTION__ ));
+        stream->primeBuffers = 0;
+    }
 
     /* Execute OnExit when exiting */
     pthread_cleanup_push( &OnExit, stream );
@@ -4444,7 +4526,9 @@ static void *CallbackThreadFunc( void *userData )
          * at least one period */
         avail = alsa_snd_pcm_avail_update( stream->playback.pcm );
         startThreshold = avail - (avail % stream->playback.framesPerPeriod);
-        assert( startThreshold >= stream->playback.framesPerPeriod );
+        /* Defensive: previously asserted startThreshold >= framesPerPeriod */
+        if( startThreshold < (snd_pcm_sframes_t)stream->playback.framesPerPeriod )
+            startThreshold = stream->playback.framesPerPeriod;
     }
     else
     {
@@ -4494,7 +4578,9 @@ static void *CallbackThreadFunc( void *userData )
         PA_ENSURE( PaAlsaStream_WaitForFrames( stream, &framesAvail, &xrun ) );
         if( xrun )
         {
-            assert( 0 == framesAvail );
+            /* Defensive: previously asserted framesAvail == 0 (PaAlsaStream_WaitForFrames
+               sets it to 0 on xrun); force it in case that ever changes. */
+            framesAvail = 0;
             continue;
 
             /* XXX: Report xruns to the user? A situation is conceivable where the callback is never invoked due
@@ -4557,17 +4643,19 @@ static void *CallbackThreadFunc( void *userData )
             }
             else
             {
-                /* We've committed to an upper bound on the size of host buffers */
-                assert( paUtilBoundedHostBufferSize == stream->bufferProcessor.hostBufferSizeMode );
+                /* We've committed to an upper bound on the size of host buffers
+                   (paUtilBoundedHostBufferSize; any non-fixed mode is treated
+                   this way, previously asserted to be paUtilBoundedHostBufferSize) */
                 framesGot = PA_MIN( framesGot, stream->maxFramesPerHostBuffer );
             }
             PA_ENSURE( PaAlsaStream_SetUpBuffers( stream, &framesGot, &xrun ) );
             /* Check the host buffer size against the buffer processor configuration */
             framesAvail -= framesGot;
 
-            if( framesGot > 0 )
+            /* Defensive: previously asserted !xrun here; don't process frames
+               if an xrun was reported */
+            if( framesGot > 0 && !xrun )
             {
-                assert( !xrun );
                 PaUtil_EndBufferProcessing( &stream->bufferProcessor, &callbackResult );
                 PA_ENSURE( PaAlsaStream_EndProcessing( stream, framesGot, &xrun ) );
             }
@@ -4605,9 +4693,13 @@ static PaError ReadStream( PaStream* s, void *buffer, unsigned long frames )
     PaAlsaStream *stream = (PaAlsaStream*)s;
     unsigned long framesGot, framesAvail;
     void *userBuffer;
-    snd_pcm_t *save = stream->playback.pcm;
+    snd_pcm_t *save;
 
-    assert( stream );
+    /* Defensive: previously asserted stream != NULL (after dereferencing it!) */
+    if( !stream )
+        return paInternalError;
+
+    save = stream->playback.pcm;
 
     PA_UNLESS( stream->capture.pcm, paCanNotReadFromAnOutputOnlyStream );
 
@@ -4666,9 +4758,13 @@ static PaError WriteStream( PaStream* s, const void *buffer, unsigned long frame
     PaAlsaStream *stream = (PaAlsaStream*)s;
     snd_pcm_uframes_t framesGot, framesAvail;
     const void *userBuffer;
-    snd_pcm_t *save = stream->capture.pcm;
+    snd_pcm_t *save;
 
-    assert( stream );
+    /* Defensive: previously asserted stream != NULL (after dereferencing it!) */
+    if( !stream )
+        return paInternalError;
+
+    save = stream->capture.pcm;
 
     PA_UNLESS( stream->playback.pcm, paCanNotWriteToAnInputOnlyStream );
 

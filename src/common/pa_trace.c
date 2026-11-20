@@ -48,7 +48,6 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
-#include <assert.h>
 #include "pa_trace.h"
 #include "pa_util.h"
 #include "pa_debugprint.h"
@@ -120,12 +119,17 @@ static const unsigned kMagik = 0xcafebabe;
 
 int PaUtil_InitializeHighSpeedLog( LogHandle* phLog, unsigned maxSizeInBytes )
 {
-    PaHighPerformanceLog* pLog = (PaHighPerformanceLog*)PaUtil_AllocateZeroInitializedMemory(sizeof(PaHighPerformanceLog));
+    PaHighPerformanceLog* pLog;
+
+    /* Defensive: previously an assertion failed on a NULL handle pointer. */
+    if( phLog == 0 )
+        return paInternalError;
+
+    pLog = (PaHighPerformanceLog*)PaUtil_AllocateZeroInitializedMemory(sizeof(PaHighPerformanceLog));
     if (pLog == 0)
     {
         return paInsufficientMemory;
     }
-    assert(phLog != 0);
     *phLog = pLog;
 
     pLog->data = (char*)PaUtil_AllocateZeroInitializedMemory(maxSizeInBytes);
@@ -143,7 +147,9 @@ int PaUtil_InitializeHighSpeedLog( LogHandle* phLog, unsigned maxSizeInBytes )
 void PaUtil_ResetHighSpeedLogTimeRef( LogHandle hLog )
 {
     PaHighPerformanceLog* pLog = (PaHighPerformanceLog*)hLog;
-    assert(pLog->magik == kMagik);
+    /* Defensive: ignore invalid handles instead of asserting. */
+    if( pLog == 0 || pLog->magik != kMagik )
+        return;
     pLog->refTime = PaUtil_GetTime();
 }
 
@@ -164,12 +170,12 @@ int PaUtil_AddHighSpeedLogMessage( LogHandle hLog, const char* fmt, ... )
     va_list l;
     int n = 0;
     PaHighPerformanceLog* pLog = (PaHighPerformanceLog*)hLog;
-    if (pLog != 0)
+    /* Defensive: ignore invalid handles instead of asserting. */
+    if (pLog != 0 && pLog->magik == kMagik)
     {
         PaLogEntryHeader* pHeader;
         char* p;
         int maxN;
-        assert(pLog->magik == kMagik);
         pHeader = (PaLogEntryHeader*)( pLog->data + pLog->writePtr );
         p = (char*)( pHeader + 1 );
         maxN = pLog->size - pLog->writePtr - 2 * sizeof(PaLogEntryHeader);
@@ -202,14 +208,23 @@ void PaUtil_DumpHighSpeedLog( LogHandle hLog, const char* fileName )
     FILE* f = (fileName != NULL) ? fopen(fileName, "w") : stdout;
     unsigned localWritePtr;
     PaHighPerformanceLog* pLog = (PaHighPerformanceLog*)hLog;
-    assert(pLog->magik == kMagik);
+    /* Defensive: ignore invalid handles instead of asserting. */
+    if( pLog == 0 || pLog->magik != kMagik )
+    {
+        if( f != NULL && f != stdout )
+            fclose( f );
+        return;
+    }
     localWritePtr = pLog->writePtr;
     while (pLog->readPtr != localWritePtr)
     {
         const PaLogEntryHeader* pHeader = (const PaLogEntryHeader*)( pLog->data + pLog->readPtr );
         const char* p = (const char*)( pHeader + 1 );
         const PaUint64 ts = (const PaUint64)( pHeader->timeStamp * USEC_PER_SEC );
-        assert(pHeader->size < (1024+sizeof(unsigned)+sizeof(PaLogEntryHeader)));
+        /* Defensive: a corrupt entry size would previously trip an assertion
+           (and could loop forever); stop dumping instead. */
+        if( pHeader->size <= 0 || pHeader->size >= (int)(1024+sizeof(unsigned)+sizeof(PaLogEntryHeader)) )
+            break;
         fprintf(f, "%05u.%03u: %s\n", (unsigned)(ts/1000), (unsigned)(ts%1000), p);
         pLog->readPtr += pHeader->size;
     }
@@ -222,7 +237,9 @@ void PaUtil_DumpHighSpeedLog( LogHandle hLog, const char* fileName )
 void PaUtil_DiscardHighSpeedLog( LogHandle hLog )
 {
     PaHighPerformanceLog* pLog = (PaHighPerformanceLog*)hLog;
-    assert(pLog->magik == kMagik);
+    /* Defensive: ignore invalid handles instead of asserting. */
+    if( pLog == 0 || pLog->magik != kMagik )
+        return;
     PaUtil_FreeMemory(pLog->data);
     PaUtil_FreeMemory(pLog);
 }

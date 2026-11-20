@@ -52,16 +52,20 @@
 
 #include "pa_cpuload.h"
 
-#include <assert.h>
-
 #include "pa_util.h"   /* for PaUtil_GetTime() */
 
 
 void PaUtil_InitializeCpuLoadMeasurer( PaUtilCpuLoadMeasurer* measurer, double sampleRate )
 {
-    assert( sampleRate > 0 );
+    /* Defensive: a non-positive sample rate would make the measured load
+       meaningless and cause a division by zero in PaUtil_EndCpuLoadMeasurement.
+       Previously an assertion failed here; degrade to a zero load reading
+       instead of terminating the process. */
+    if( sampleRate > 0. )
+        measurer->samplingPeriod = 1. / sampleRate;
+    else
+        measurer->samplingPeriod = 0.;
 
-    measurer->samplingPeriod = 1. / sampleRate;
     measurer->averageLoad = 0.;
 }
 
@@ -80,10 +84,9 @@ void PaUtil_EndCpuLoadMeasurement( PaUtilCpuLoadMeasurer* measurer, unsigned lon
 {
     double measurementEndTime, secondsFor100Percent, measuredLoad;
 
-    if( framesProcessed > 0 ){
+    if( framesProcessed > 0 && measurer->samplingPeriod > 0. ){
         measurementEndTime = PaUtil_GetTime();
 
-        assert( framesProcessed > 0 );
         secondsFor100Percent = framesProcessed * measurer->samplingPeriod;
 
         measuredLoad = (measurementEndTime - measurer->measurementStartTime) / secondsFor100Percent;

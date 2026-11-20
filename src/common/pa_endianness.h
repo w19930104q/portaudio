@@ -54,7 +54,8 @@
  example.
 
  A PA_VALIDATE_ENDIANNESS macro is provided to compare the compile time
- and runtime endianness and raise an assertion if they don't match.
+ and runtime endianness. It evaluates to non-zero if they match, so callers
+ can report an error instead of raising an assertion.
 */
 
 
@@ -116,26 +117,15 @@ extern "C"
 #endif
 
 
-/* PA_VALIDATE_ENDIANNESS compares the compile time and runtime endianness,
- and raises an assertion if they don't match. <assert.h> must be included in
- the context in which this macro is used.
+/* PA_VALIDATE_ENDIANNESS compares the compile time and runtime endianness.
+ It evaluates to non-zero if they match, and zero if they don't, allowing the
+ caller to report an error instead of raising a process-terminating assertion.
+ The argument must be an lvalue of integer type with the value 1.
 */
-#if defined(NDEBUG)
-    #define PA_VALIDATE_ENDIANNESS
-#else
-    #if defined(PA_LITTLE_ENDIAN)
-        #define PA_VALIDATE_ENDIANNESS \
-        { \
-            const long nativeOne = 1; \
-            assert( "PortAudio: compile time and runtime endianness don't match" && (((char *)&nativeOne)[0]) == 1 ); \
-        }
-    #elif defined(PA_BIG_ENDIAN)
-        #define PA_VALIDATE_ENDIANNESS \
-        { \
-            const long nativeOne = 1; \
-            assert( "PortAudio: compile time and runtime endianness don't match" && (((char *)&nativeOne)[0]) == 0 ); \
-        }
-    #endif
+#if defined(PA_LITTLE_ENDIAN)
+    #define PA_VALIDATE_ENDIANNESS(nativeOne) ( (((char *)&(nativeOne))[0]) == 1 )
+#elif defined(PA_BIG_ENDIAN)
+    #define PA_VALIDATE_ENDIANNESS(nativeOne) ( (((char *)&(nativeOne))[0]) == 0 )
 #endif
 
 
