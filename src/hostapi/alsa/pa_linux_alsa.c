@@ -778,6 +778,15 @@ typedef struct PaAlsaStream
     volatile sig_atomic_t isActive;         /* Is stream in active state? (Between StartStream and StopStream || !paContinue) */
     PaUnixMutex stateMtx;                   /* Used to synchronize access to stream state */
 
+    /* Synchronization between blocking I/O (ReadStream/WriteStream) and Stop/Abort/CloseStream
+     * on another thread. A blocking read or write may be polling the device in
+     * PaAlsaStream_WaitForFrames() when another thread stops and closes the stream; the pcms
+     * must not be closed and the stream must not be freed until the blocking call has returned.
+     * blockingIoActive and blockingIoCond are protected by stateMtx. */
+    volatile sig_atomic_t blockingStopRequested;  /* Set by Stop/Abort/CloseStream to make blocking I/O bail out */
+    int blockingIoActive;                         /* Number of threads currently inside blocking I/O */
+    pthread_cond_t blockingIoCond;                /* Signalled when blockingIoActive drops to zero */
+
     int neverDropInput;
 
     PaTime underrun;
@@ -2342,6 +2351,10 @@ static PaError PaAlsaStream_Initialize( PaAlsaStream *self, PaAlsaHostApiReprese
     PaUtil_InitializeCpuLoadMeasurer( &self->cpuLoadMeasurer, sampleRate );
     ASSERT_CALL_( PaUnixMutex_Initialize( &self->stateMtx ), paNoError );
 
+    self->blockingStopRequested = 0;
+    self->blockingIoActive = 0;
+    ASSERT_CALL_( pthread_cond_init( &self->blockingIoCond, NULL ), 0 );
+
 error:
     return result;
 }
@@ -2364,9 +2377,62 @@ static void PaAlsaStream_Terminate( PaAlsaStream *self )
     }
 
     PaUtil_FreeMemory( self->pfds );
+    ASSERT_CALL_( pthread_cond_destroy( &self->blockingIoCond ), 0 );
     ASSERT_CALL_( PaUnixMutex_Terminate( &self->stateMtx ), paNoError );
 
     PaUtil_FreeMemory( self );
+}
+
+/** Register that the calling thread is entering a blocking I/O section (ReadStream/WriteStream
+ * and the GetStream*Available queries), so that Stop/Abort/CloseStream on another thread can
+ * wait for it to leave before the pcms are stopped and the stream is freed.
+ *
+ * @return Value of blockingStopRequested sampled under the lock. If non-zero, a Stop/Abort/Close
+ * is in progress and the caller must leave the section again (BlockingIoLeave) without touching
+ * the pcms.
+ */
+static int BlockingIoEnter( PaAlsaStream *stream )
+{
+    int stopRequested;
+
+    ASSERT_CALL_( PaUnixMutex_Lock( &stream->stateMtx ), paNoError );
+    ++stream->blockingIoActive;
+    stopRequested = stream->blockingStopRequested;
+    ASSERT_CALL_( PaUnixMutex_Unlock( &stream->stateMtx ), paNoError );
+
+    return stopRequested;
+}
+
+/** Leave a blocking I/O section, waking up Stop/Abort/CloseStream if it is waiting for the
+ * last blocking I/O call to return. Broadcast (not signal) because Stop and Close may be
+ * waiting concurrently from two threads.
+ */
+static void BlockingIoLeave( PaAlsaStream *stream )
+{
+    ASSERT_CALL_( PaUnixMutex_Lock( &stream->stateMtx ), paNoError );
+    if( --stream->blockingIoActive == 0 )
+    {
+        ASSERT_CALL_( pthread_cond_broadcast( &stream->blockingIoCond ), 0 );
+    }
+    ASSERT_CALL_( PaUnixMutex_Unlock( &stream->stateMtx ), paNoError );
+}
+
+/** Request any in-flight blocking I/O to bail out (via blockingStopRequested, polled in
+ * PaAlsaStream_WaitForFrames()) and wait until no thread is inside a blocking I/O section
+ * anymore. Must be called before the pcms are stopped/closed and before the stream is freed,
+ * so a concurrent Pa_ReadStream/Pa_WriteStream can never touch freed memory. The wait cannot
+ * deadlock: the poll timeout is bounded, so a blocked reader/writer observes
+ * blockingStopRequested within one poll period and returns paStreamIsStopped.
+ */
+static void BlockingIoRequestStopAndWait( PaAlsaStream *stream )
+{
+    ASSERT_CALL_( PaUnixMutex_Lock( &stream->stateMtx ), paNoError );
+    stream->blockingStopRequested = 1;
+    while( stream->blockingIoActive > 0 )
+    {
+        ASSERT_CALL_( pthread_cond_wait( &stream->blockingIoCond, &stream->stateMtx.mtx ), 0 );
+    }
+    ASSERT_CALL_( PaUnixMutex_Unlock( &stream->stateMtx ), paNoError );
 }
 
 /** Calculate polling timeout
@@ -3057,6 +3123,10 @@ static PaError CloseStream( PaStream* s )
     PaError result = paNoError;
     PaAlsaStream *stream = (PaAlsaStream*)s;
 
+    /* Make sure no blocking Read/Write (or other in-flight stream query) is still using
+     * the pcms before we free the stream */
+    BlockingIoRequestStopAndWait( stream );
+
     PaUtil_TerminateBufferProcessor( &stream->bufferProcessor );
     PaUtil_TerminateStreamRepresentation( &stream->streamRepresentation );
 
@@ -3167,6 +3237,9 @@ static PaError StartStream( PaStream *s )
 
     /* Ready the processor */
     PaUtil_ResetBufferProcessor( &stream->bufferProcessor );
+
+    /* Clear any stop request from a previous Stop/Abort, so blocking I/O can proceed again */
+    stream->blockingStopRequested = 0;
 
     /* Set now, so we can test for activity further down */
     stream->isActive = 1;
@@ -3292,6 +3365,10 @@ static PaError RealStop( PaAlsaStream *stream, int abort )
     }
     else
     {
+        /* A blocking Read/Write on another thread may be polling the pcms right now;
+         * make it bail out and wait for it to return before we touch the pcms */
+        BlockingIoRequestStopAndWait( stream );
+
         PA_ENSURE( AlsaStop( stream, abort ) );
     }
 
@@ -3357,6 +3434,7 @@ static PaTime StatusToTime( const snd_pcm_status_t *status, int trigger, snd_pcm
 static PaTime GetStreamTime( PaStream *s )
 {
     PaAlsaStream *stream = (PaAlsaStream*)s;
+    PaTime result;
 
     snd_timestamp_t timestamp;
     snd_pcm_status_t* status;
@@ -3368,6 +3446,10 @@ static PaTime GetStreamTime( PaStream *s )
      * libasound routines are being called from multiple threads.
      * need to verify that libasound is thread-safe. */
 
+    /* Register as inside stream I/O so CloseStream on another thread waits for us before
+     * freeing the stream */
+    (void)BlockingIoEnter( stream );
+
     if( stream->capture.pcm )
     {
         alsa_snd_pcm_status( stream->capture.pcm, status );
@@ -3377,7 +3459,11 @@ static PaTime GetStreamTime( PaStream *s )
         alsa_snd_pcm_status( stream->playback.pcm, status );
     }
 
-    return StatusToTime( status, 0, NULL );
+    result = StatusToTime( status, 0, NULL );
+
+    BlockingIoLeave( stream );
+
+    return result;
 }
 
 static double GetStreamCpuLoad( PaStream* s )
@@ -3971,6 +4057,12 @@ static PaError PaAlsaStream_WaitForFrames( PaAlsaStream *self, unsigned long *fr
 
     if( !self->callbackMode )
     {
+        /* Stop/Abort/CloseStream on another thread may have requested blocking I/O to bail out */
+        if( self->blockingStopRequested )
+        {
+            PA_ENSURE( paStreamIsStopped );
+        }
+
         /* In blocking mode we will only wait if necessary */
         PA_ENSURE( PaAlsaStream_GetAvailableFrames( self, self->capture.pcm != NULL, self->playback.pcm != NULL,
                     framesAvail, &xrun ) );
@@ -3995,6 +4087,12 @@ static PaError PaAlsaStream_WaitForFrames( PaAlsaStream *self, unsigned long *fr
     {
         int totalFds = 0;
         struct pollfd *capturePfds = NULL, *playbackPfds = NULL;
+
+        /* Bail out if Stop/Abort/CloseStream on another thread requested blocking I/O to end */
+        if( !self->callbackMode && self->blockingStopRequested )
+        {
+            PA_ENSURE( paStreamIsStopped );
+        }
 
 #ifdef PTHREAD_CANCELED
         pthread_testcancel();
@@ -4039,6 +4137,13 @@ static PaError PaAlsaStream_WaitForFrames( PaAlsaStream *self, unsigned long *fr
             pthread_setcancelstate( PTHREAD_CANCEL_DISABLE, NULL );
         }
 #endif
+
+        /* Bail out if Stop/Abort/CloseStream on another thread requested blocking I/O to end
+         * while we were inside poll() */
+        if( !self->callbackMode && self->blockingStopRequested )
+        {
+            PA_ENSURE( paStreamIsStopped );
+        }
 
         if( pollResults < 0 )
         {
@@ -4609,6 +4714,15 @@ static PaError ReadStream( PaStream* s, void *buffer, unsigned long frames )
 
     assert( stream );
 
+    /* Register as inside blocking I/O so Stop/Abort/CloseStream on another thread waits for
+     * us before stopping the pcms and freeing the stream; bail out cleanly if a stop/close
+     * was already requested */
+    if( BlockingIoEnter( stream ) )
+    {
+        result = paStreamIsStopped;
+        goto end;
+    }
+
     PA_UNLESS( stream->capture.pcm, paCanNotReadFromAnOutputOnlyStream );
 
     /* Disregard playback */
@@ -4654,6 +4768,7 @@ static PaError ReadStream( PaStream* s, void *buffer, unsigned long frames )
 
 end:
     stream->playback.pcm = save;
+    BlockingIoLeave( stream );
     return result;
 error:
     goto end;
@@ -4669,6 +4784,15 @@ static PaError WriteStream( PaStream* s, const void *buffer, unsigned long frame
     snd_pcm_t *save = stream->capture.pcm;
 
     assert( stream );
+
+    /* Register as inside blocking I/O so Stop/Abort/CloseStream on another thread waits for
+     * us before stopping the pcms and freeing the stream; bail out cleanly if a stop/close
+     * was already requested */
+    if( BlockingIoEnter( stream ) )
+    {
+        result = paStreamIsStopped;
+        goto end;
+    }
 
     PA_UNLESS( stream->playback.pcm, paCanNotWriteToAnInputOnlyStream );
 
@@ -4721,6 +4845,7 @@ static PaError WriteStream( PaStream* s, const void *buffer, unsigned long frame
 
 end:
     stream->capture.pcm = save;
+    BlockingIoLeave( stream );
     return result;
 error:
     goto end;
@@ -4734,6 +4859,10 @@ static signed long GetStreamReadAvailable( PaStream* s )
     unsigned long avail;
     int xrun;
 
+    /* Register as inside blocking I/O so CloseStream on another thread waits for us before
+     * freeing the stream */
+    (void)BlockingIoEnter( stream );
+
     PA_ENSURE( PaAlsaStreamComponent_GetAvailableFrames( &stream->capture, &avail, &xrun ) );
     if( xrun )
     {
@@ -4743,9 +4872,11 @@ static signed long GetStreamReadAvailable( PaStream* s )
             PA_ENSURE( paInputOverflowed );
     }
 
+    BlockingIoLeave( stream );
     return (signed long)avail;
 
 error:
+    BlockingIoLeave( stream );
     return result;
 }
 
@@ -4755,6 +4886,10 @@ static signed long GetStreamWriteAvailable( PaStream* s )
     PaAlsaStream *stream = (PaAlsaStream*)s;
     unsigned long avail;
     int xrun;
+
+    /* Register as inside blocking I/O so CloseStream on another thread waits for us before
+     * freeing the stream */
+    (void)BlockingIoEnter( stream );
 
     PA_ENSURE( PaAlsaStreamComponent_GetAvailableFrames( &stream->playback, &avail, &xrun ) );
     if( xrun )
@@ -4770,9 +4905,11 @@ static signed long GetStreamWriteAvailable( PaStream* s )
         avail = (unsigned long) savail;
     }
 
+    BlockingIoLeave( stream );
     return (signed long)avail;
 
 error:
+    BlockingIoLeave( stream );
     return result;
 }
 

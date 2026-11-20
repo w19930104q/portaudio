@@ -113,6 +113,7 @@ TESTS = \
 	bin/patest_multi_sine \
 	bin/patest_out_underflow \
 	bin/patest_prime \
+	bin/patest_read_stop_close_race \
 	bin/patest_ringmix \
 	bin/patest_sine8 \
 	bin/patest_sine_channelmaps \
