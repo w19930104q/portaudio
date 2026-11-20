@@ -3506,6 +3506,22 @@ static PaError PaAlsaStream_HandleXrun( PaAlsaStream *self )
                     PA_DEBUG(( "%s: [capture] non-MMAP-PCM failed recovering from XRUN, will restart Alsa\n", __FUNCTION__ ));
                     ++ restartAlsa; /* did not manage to recover */
                 }
+                else if( !self->pcmsSynced &&
+                        alsa_snd_pcm_state( self->capture.pcm ) == SND_PCM_STATE_PREPARED )
+                {
+                    /* snd_pcm_recover() only prepares a capture PCM, it does not start it.
+                     * Unlike playback (which restarts automatically once enough frames have
+                     * been written) a capture PCM never leaves PREPARED state on its own:
+                     * the callback thread polls the device before reading, and poll only
+                     * reports events for a running device. Without an explicit start the
+                     * stream would stay "active" but no further callbacks would fire. */
+                    PA_DEBUG(( "%s: restarting prepared non-mmap capture PCM after XRUN recovery\n", __FUNCTION__ ));
+                    if( alsa_snd_pcm_start( self->capture.pcm ) < 0 )
+                    {
+                        PA_DEBUG(( "%s: [capture] failed to restart PCM after XRUN recovery, will restart Alsa\n", __FUNCTION__ ));
+                        ++ restartAlsa; /* did not manage to restart */
+                    }
+                }
             }
             else
                 ++ restartAlsa; /* always restart MMAPed device */
