@@ -613,11 +613,16 @@ PaError PaPulseAudio_Initialize( PaUtilHostApiRepresentation ** hostApi,
 
     ret = 0;
 
-    /* We should wait that PulseAudio server let us in or fails us */
+    /* Wait until the PulseAudio server accepts us or fails the connection.
+     *
+     * The context state callbacks run on the mainloop event thread and wake
+     * us with pa_threaded_mainloop_signal(). Those signals carry no counter,
+     * so if the server reaches READY (or FAILED) before this thread enters
+     * wait() the wake-up is lost and wait() would block forever. Checking
+     * the connection state *before* each wait makes the lost signal harmless:
+     * a predicate loop instead of a bare wait(). */
     while( !ret )
     {
-        pa_threaded_mainloop_wait( pulseaudioHostApi->mainloop );
-
         result = PaPulseAudio_CheckConnection( pulseaudioHostApi );
 
         if( result > PA_OK )
@@ -630,6 +635,13 @@ PaError PaPulseAudio_Initialize( PaUtilHostApiRepresentation ** hostApi,
         if( result == PA_OK )
         {
             ret = 1;
+        }
+        else
+        {
+            /* Still connecting/authorizing: block until the next state
+             * callback signals us, then loop and re-check the state under
+             * the lock. */
+            pa_threaded_mainloop_wait( pulseaudioHostApi->mainloop );
         }
     }
 
@@ -1403,16 +1415,21 @@ PaTime GetStreamTime( PaStream * s )
     PaPulseAudio_Stream *stream = (PaPulseAudio_Stream *) s;
     PaPulseAudio_HostApiRepresentation *pulseaudioHostApi = stream->hostapi;
     PaStreamCallbackTimeInfo timeInfo = { 0, 0, 0 };
+    PaTime result = 0;
 
     PaPulseAudio_Lock( pulseaudioHostApi->mainloop );
 
     if( stream->outputStream )
     {
+        /* On -PA_ERR_NODATA fall through instead of exiting early: leaving
+         * via an early exit path here used to leave the mainloop lock held,
+         * which froze the PulseAudio event thread and blocked every
+         * subsequent PortAudio call in the whole process. */
         if( PaPulseAudio_updateTimeInfo( stream->outputStream,
                                          &timeInfo,
-                                         0 ) == -PA_ERR_NODATA )
+                                         0 ) != -PA_ERR_NODATA )
         {
-            return 0;
+            result = timeInfo.currentTime;
         }
     }
 
@@ -1420,14 +1437,14 @@ PaTime GetStreamTime( PaStream * s )
     {
         if( PaPulseAudio_updateTimeInfo( stream->inputStream,
                                          &timeInfo,
-                                         1 )  == -PA_ERR_NODATA )
+                                         1 ) != -PA_ERR_NODATA )
         {
-            return 0;
+            result = timeInfo.currentTime;
         }
     }
 
     PaPulseAudio_UnLock( pulseaudioHostApi->mainloop );
-    return timeInfo.currentTime;
+    return result;
 }
 
 

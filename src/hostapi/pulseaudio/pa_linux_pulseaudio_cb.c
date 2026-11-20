@@ -690,12 +690,19 @@ PaError _PaPulseAudio_WaitStreamState( pa_threaded_mainloop *mainloop, pa_stream
     unsigned int wait = 0;
     PaError result = paNoError;
 
+    /* pa_threaded_mainloop_wait() must be called with the mainloop lock
+     * held. The old code invoked it unlocked, which is undefined behaviour:
+     * on glibc the call comes back immediately, turning this loop into an
+     * uncontrolled busy-spin that could report success before the stream was
+     * actually ready. Holding the lock for the whole loop and checking the
+     * state *before* each blocking step also closes the lost-signal race
+     * (a state transition whose signal arrived before the first block is
+     * still seen). */
+    PaPulseAudio_Lock( mainloop );
+
     while( wait < 1000 )
     {
-        pa_threaded_mainloop_wait( mainloop );
-        PaPulseAudio_Lock( mainloop );
         state = pa_stream_get_state( stream );
-        PaPulseAudio_UnLock( mainloop );
 
         switch(state)
         {
@@ -715,6 +722,12 @@ PaError _PaPulseAudio_WaitStreamState( pa_threaded_mainloop *mainloop, pa_stream
                 result = paNotInitialized;
                 wait = 10000;
                 break;
+
+            default:
+                /* PA_STREAM_CREATING / PA_STREAM_UNCONNECTED: block until the
+                 * next stream-state callback signals us, then re-check. */
+                pa_threaded_mainloop_wait( mainloop );
+                break;
         }
 
         /* Creating can take some time */
@@ -723,6 +736,8 @@ PaError _PaPulseAudio_WaitStreamState( pa_threaded_mainloop *mainloop, pa_stream
             wait ++;
         }
     }
+
+    PaPulseAudio_UnLock( mainloop );
 
     return result;
 }
